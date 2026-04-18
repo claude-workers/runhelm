@@ -206,6 +206,12 @@ run_deploy() {
     || { write_failure_report "docker compose build failed"; return 1; }
 
   PHASE="up"
+  # Transitional hygiene: wipe any stale SQLite sidecar files from the
+  # previous orchestrator process. Once every running orchestrator is in
+  # journal_mode=DELETE this is a no-op; during the WAL→DELETE migration
+  # it prevents SQLITE_CANTOPEN on the very next start.
+  rm -f "${DB_DIR}/${DB_FILE_NAME}-wal" "${DB_DIR}/${DB_FILE_NAME}-shm" \
+        "${DB_DIR}/${DB_FILE_NAME}-journal" 2>/dev/null || true
   log "compose up -d --force-recreate $SERVICE_NAME"
   capture compose up -d --force-recreate "$SERVICE_NAME" \
     || { write_failure_report "docker compose up failed"; return 1; }
