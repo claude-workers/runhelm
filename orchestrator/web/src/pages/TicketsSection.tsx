@@ -149,7 +149,9 @@ export function TicketsSection({
               <TicketRow
                 key={t.id}
                 t={t}
+                projectKey={key}
                 sprint={t.sprint_id ? sprintById.get(t.sprint_id) : undefined}
+                colors={colors}
                 onOpen={() => openTicket(t)}
               />
             ))}
@@ -474,12 +476,20 @@ export function TicketDetailView({
 
   const setStatus = async (status: TicketStatus) => {
     if (!ticketId) return;
-    await api(`/api/projects/${projectId}/tickets/${ticketId}`, {
-      method: "PATCH",
-      body: JSON.stringify({ status }),
-    });
-    onChanged();
-    refresh();
+    setBusy(true);
+    setErr(null);
+    try {
+      await api(`/api/projects/${projectId}/tickets/${ticketId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status }),
+      });
+      onChanged();
+      refresh();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
   };
 
   useEffect(() => {

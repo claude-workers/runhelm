@@ -3,6 +3,9 @@ import { db, getSetting, setSetting } from "./db.js";
 import { cloneInto } from "./git.js";
 import { channels, parseChannels, refFor, type ChannelId } from "./channels/index.js";
 import { generateUniqueKey, type Project } from "./workers.js";
+import { getSelfProject } from "./self-project-query.js";
+
+export { getSelfProject };
 
 const SELF_SLUG = "runhelm";
 const SELF_NAME = "Runhelm";
@@ -16,14 +19,6 @@ export function getSelfRepoUrl(): string {
 
 export function setSelfRepoUrl(url: string): void {
   setSetting("orchestrator_self_repo_url", url.trim());
-}
-
-export function getSelfProject(): Project | null {
-  return (
-    (db
-      .prepare("SELECT * FROM projects WHERE is_self = 1 LIMIT 1")
-      .get() as Project | undefined) ?? null
-  );
 }
 
 /**

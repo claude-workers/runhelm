@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { config } from "../config.js";
 import { db } from "../db.js";
 import { addComment, createTicket, type Ticket } from "../tickets.js";
-import { getSelfProject } from "../self-project.js";
+import { getSelfProject } from "../self-project-query.js";
 import { createSprint, getActiveSprint, updateSprint } from "../sprints.js";
 import { sendAdminAlert } from "./alerts.js";
 import { getBackup, listBackups, setPreviousAlias } from "./backup.js";

@@ -2,7 +2,7 @@ import { existsSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { config } from "../config.js";
 import { getSecret, getSetting } from "../db.js";
-import { getSelfProject } from "../self-project.js";
+import { getSelfProject } from "../self-project-query.js";
 import { telegramChannel } from "../channels/telegram.js";
 import { matrixChannel } from "../channels/matrix.js";
 

@@ -64,16 +64,16 @@ export function SprintsSection({
   const release = async (s: Sprint) => {
     if (
       !confirm(
-        `Sprint "${s.name}" freigeben? Erstellt PR \`${s.branch}\` → main.`
+        `Sprint "${s.name}" freigeben? Merget \`${s.branch}\` → main und startet ggf. Self-Deploy.`
       )
     )
       return;
     try {
-      const res = await api<{ pr: { url: string; number: number } }>(
+      const res = await api<{ mergedInto: string }>(
         `/api/projects/${projectId}/sprints/${s.id}/release`,
         { method: "POST" }
       );
-      alert(`PR #${res.pr.number} erstellt: ${res.pr.url}`);
+      alert(`Sprint gemerged → \`${res.mergedInto}\`.`);
       refresh();
     } catch (e) {
       alert((e as Error).message);

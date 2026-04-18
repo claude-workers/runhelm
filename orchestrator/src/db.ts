@@ -140,6 +140,9 @@ if (!hasColumn("tickets", "sprint_id")) {
 if (!hasColumn("tickets", "type")) {
   db.exec(`ALTER TABLE tickets ADD COLUMN type TEXT NOT NULL DEFAULT 'task'`);
 }
+if (!hasColumn("tickets", "paused_at")) {
+  db.exec(`ALTER TABLE tickets ADD COLUMN paused_at INTEGER`);
+}
 if (!hasColumn("projects", "system_prompt")) {
   db.exec(`ALTER TABLE projects ADD COLUMN system_prompt TEXT`);
 }

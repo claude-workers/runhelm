@@ -5,7 +5,7 @@ import { bus } from "../bus.js";
 import { openPullRequest } from "../git.js";
 import { findTicketByMatrixThread, handleTicketReply } from "../tickets.js";
 import { handleAdminCommand } from "../deploy/admin-commands.js";
-import { getSelfProject } from "../self-project.js";
+import { getSelfProject } from "../self-project-query.js";
 import type { ChatChannel } from "./index.js";
 
 function isAdminRoom(roomId: string): boolean {

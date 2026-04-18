@@ -85,8 +85,8 @@ export default async function sprintRoutes(app: FastifyInstance) {
     if (!s || s.project_id !== req.params.id)
       return reply.code(404).send({ error: "sprint not found" });
     try {
-      const pr = await releaseSprint(s.id, req.body?.title, req.body?.body);
-      return { ok: true, pr, sprint: getSprint(s.id) };
+      const result = await releaseSprint(s.id, req.body?.title, req.body?.body);
+      return { ok: true, ...result, sprint: getSprint(s.id) };
     } catch (e) {
       return reply.code(400).send({ error: (e as Error).message });
     }

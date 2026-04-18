@@ -11,7 +11,12 @@ import {
   type TicketStatus,
 } from "../tickets.js";
 import { getProject } from "../workers.js";
-import { acceptTicket, notifyTicketDescriptionChanged } from "../scheduler.js";
+import {
+  acceptTicket,
+  notifyTicketDescriptionChanged,
+  pauseTicketToBacklog,
+  startOrResumeTicket,
+} from "../scheduler.js";
 
 export default async function ticketRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>(
@@ -89,16 +94,55 @@ export default async function ticketRoutes(app: FastifyInstance) {
     if (!t || t.project_id !== req.params.id)
       return reply.code(404).send({ error: "ticket not found" });
     const body = req.body ?? {};
+
+    // Manually setting status to "in_progress" should actually start the
+    // ticket (branch setup + worker prompt), not just flip a DB column.
+    if (body.status === "in_progress" && t.status !== "in_progress") {
+      try {
+        await startOrResumeTicket(t.id);
+      } catch (e) {
+        return reply.code(400).send({ error: (e as Error).message });
+      }
+      const { status: _ignored, ...rest } = body;
+      if (Object.keys(rest).length > 0) updateTicket(t.id, rest);
+      return getTicket(t.id);
+    }
+
+    // Pause-to-backlog: stop actions, snapshot state into the branch
+    if (
+      body.status === "backlog" &&
+      (t.status === "in_progress" || t.status === "awaiting_reply")
+    ) {
+      try {
+        await pauseTicketToBacklog(t.id);
+      } catch (e) {
+        return reply.code(400).send({ error: (e as Error).message });
+      }
+      const { status: _ignored, ...rest } = body;
+      if (Object.keys(rest).length > 0) updateTicket(t.id, rest);
+      return getTicket(t.id);
+    }
+
+    // Description-change validation (T-4): after ready_for_testing the ticket
+    // is considered content-frozen.
     const descInBody = Object.prototype.hasOwnProperty.call(body, "description");
     const newDesc = descInBody ? (body.description ?? null) : t.description;
     const descChanged = descInBody && newDesc !== t.description;
-    if (descChanged && (t.status === "ready_for_testing" || t.status === "done" || t.status === "cancelled")) {
+    if (
+      descChanged &&
+      (t.status === "ready_for_testing" || t.status === "done" || t.status === "cancelled")
+    ) {
       return reply
         .code(409)
         .send({ error: "Beschreibung kann ab 'ready for test' nicht mehr geändert werden." });
     }
+
     const updated = updateTicket(t.id, body);
-    if (descChanged && updated && (updated.status === "in_progress" || updated.status === "awaiting_reply")) {
+    if (
+      descChanged &&
+      updated &&
+      (updated.status === "in_progress" || updated.status === "awaiting_reply")
+    ) {
       notifyTicketDescriptionChanged(updated.id).catch((err) =>
         req.log.error({ err }, "description notify failed")
       );

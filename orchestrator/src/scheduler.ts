@@ -1,5 +1,8 @@
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { db } from "./db.js";
 import { bus, type BusEvent } from "./bus.js";
+import { config } from "./config.js";
 import { sendToWorker } from "./workers.js";
 import {
   commitWip,
@@ -19,6 +22,7 @@ import {
   getNextResumable,
   getTicket,
   listComments,
+  setTicketPaused,
   setTicketStatus,
   type Ticket,
 } from "./tickets.js";
@@ -31,6 +35,7 @@ type ProjectRow = {
   slug: string;
   upstream_repo: string | null;
   upstream_default_branch: string | null;
+  is_self: number;
 };
 
 type AwaitState = {
@@ -414,11 +419,13 @@ async function startTicket(t: Ticket): Promise<void> {
     branch,
     startedAt: Date.now(),
   });
+  // Clear paused flag on (re-)start so future scheduler picks see it again
+  setTicketPaused(t.id, null);
 
   // reset worker session so each ticket gets a fresh Claude context
   sendToWorker(worker, { type: "reset_session" });
 
-  const prompt = buildInitialPrompt(t);
+  const prompt = buildInitialPrompt(t, project);
   await addComment(
     t.id,
     "system",
@@ -500,10 +507,23 @@ async function sendTicketPrompt(
   });
 }
 
-function buildInitialPrompt(t: Ticket): string {
+function buildInitialPrompt(t: Ticket, project: ProjectRow): string {
+  const snapshotPath = `.runhelm/tickets/T${t.number}.md`;
+  let hasSnapshot = false;
+  try {
+    hasSnapshot = existsSync(
+      join(config.reposContainerPath, project.slug, snapshotPath)
+    );
+  } catch {
+    // ignore
+  }
+
   return [
     `Du arbeitest an Ticket T-${t.number}: ${t.title}.`,
     t.description ? `\nBeschreibung:\n${t.description}` : "",
+    hasSnapshot
+      ? `\nDieses Ticket wurde zuvor pausiert. In \`${snapshotPath}\` liegt der Verlauf und Zwischenstand — lies es als Erstes und führe die Arbeit daran nahtlos fort.`
+      : "",
     ``,
     `WICHTIG:`,
     `- Wenn du zusätzliche Info vom User brauchst, beginne deine Antwort mit einer`,
@@ -547,7 +567,7 @@ function getProjectRow(projectId: string): ProjectRow | null {
   return (
     (db
       .prepare(
-        "SELECT id, slug, upstream_repo, upstream_default_branch FROM projects WHERE id = ?"
+        "SELECT id, slug, upstream_repo, upstream_default_branch, is_self FROM projects WHERE id = ?"
       )
       .get(projectId) as ProjectRow | undefined) ?? null
   );
@@ -687,6 +707,156 @@ export async function notifyTicketDescriptionChanged(
 }
 
 /**
+ * User-driven pause: ticket goes back to `backlog`, actions stop, and a
+ * human-readable snapshot is committed to the branch at
+ * `.runhelm/tickets/T{n}.md` so the state survives the pause and is
+ * available to the worker (or a reviewer) on resume.
+ */
+export async function pauseTicketToBacklog(ticketId: string): Promise<void> {
+  const t = getTicket(ticketId);
+  if (!t) throw new Error("Ticket nicht gefunden");
+  if (t.status !== "in_progress" && t.status !== "awaiting_reply") return;
+
+  const project = getProjectRow(t.project_id);
+  if (!project) throw new Error("Projekt nicht gefunden");
+
+  // Cancel any await/permission timers so the scheduler doesn't race
+  const pending = awaits.get(ticketId);
+  if (pending) {
+    clearTimeout(pending.timer);
+    awaits.delete(ticketId);
+    if (pending.reason === "permission" && pending.permissionRequestId) {
+      bus.emit({
+        type: "permission_resolved",
+        requestId: pending.permissionRequestId,
+        allow: false,
+        note: "Ticket pausiert durch User.",
+      });
+    }
+  }
+
+  // Build and write the markdown snapshot INTO the ticket's branch so it
+  // travels with the work. Use git add -A so the worker's uncommitted
+  // edits (if any) land in the same pause commit — nothing gets lost.
+  const snapshot = buildPauseSnapshot(t, project);
+  const snapshotPath = `.runhelm/tickets/T${t.number}.md`;
+  try {
+    const repoRoot = join(config.reposContainerPath, project.slug);
+    const dir = join(repoRoot, ".runhelm", "tickets");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(repoRoot, snapshotPath), snapshot);
+
+    if (t.branch) {
+      await commitWipAndPush(
+        project.slug,
+        t.branch,
+        `Pause: T-${t.number} ${t.title}`
+      );
+    } else {
+      await commitWip(project.slug, `Pause: T-${t.number} ${t.title}`);
+    }
+  } catch (err) {
+    console.error("[scheduler] pause-snapshot write/commit failed", err);
+  }
+
+  setTicketStatus(ticketId, "backlog", {
+    awaitingSince: null,
+    autoResume: 0,
+  });
+  // Mark paused so the scheduler's auto-pick skips this one until the user
+  // explicitly flips it back to in_progress.
+  setTicketPaused(ticketId, Date.now());
+  await addComment(
+    ticketId,
+    "system",
+    `⏸ Pausiert — Stand in \`${snapshotPath}\` auf \`${t.branch ?? "(kein Branch)"}\` gesichert. Worker bekommt keine neuen Prompts mehr.`,
+    "ui"
+  );
+}
+
+function buildPauseSnapshot(t: Ticket, project: ProjectRow): string {
+  const comments = listComments(t.id);
+  const sprintName = t.sprint_id ? getSprint(t.sprint_id)?.name ?? "—" : "—";
+  const now = new Date().toISOString();
+
+  const metaRows: string[] = [
+    `- **ID**: \`${t.id}\``,
+    `- **Branch**: \`${t.branch ?? "(none)"}\``,
+    `- **Priority**: ${t.priority}`,
+    `- **Sprint**: ${sprintName}`,
+    `- **Type**: ${(t as Ticket & { type?: string }).type ?? "task"}`,
+    `- **Started at**: ${t.started_at ? new Date(t.started_at).toISOString() : "—"}`,
+    `- **Paused at**: ${now}`,
+  ];
+
+  const log = comments
+    .map((c) => {
+      const ts = new Date(c.ts).toISOString();
+      const who = c.role === "assistant" ? "claude" : c.role;
+      return `### ${ts} · ${who}${c.origin ? ` _(${c.origin})_` : ""}\n\n${c.text}\n`;
+    })
+    .join("\n---\n\n");
+
+  return [
+    `# T${t.number}: ${t.title}`,
+    ``,
+    `> **Status**: paused (was \`${t.status}\`)`,
+    ``,
+    ...metaRows,
+    ``,
+    `## Description`,
+    ``,
+    t.description?.trim() || "_(none)_",
+    ``,
+    `## Progress log`,
+    ``,
+    log || "_(no comments)_",
+    ``,
+  ].join("\n");
+}
+
+/**
+ * User-driven "move to in_progress": runs the same setup path as the
+ * automatic scheduler (branch switch, WIP commit, worker prompt). Decides
+ * between a fresh start and a resume based on the ticket's current status.
+ * Throws on preconditions so the caller can surface the error in the UI.
+ */
+export async function startOrResumeTicket(ticketId: string): Promise<void> {
+  const t = getTicket(ticketId);
+  if (!t) throw new Error("Ticket nicht gefunden");
+
+  const existing = getActiveInProgress(t.project_id);
+  if (existing && existing.id !== ticketId) {
+    throw new Error(
+      `Ticket „${existing.title}" läuft bereits — erst abschließen oder pausieren.`
+    );
+  }
+
+  const worker = getWorkerId(t.project_id);
+  if (!worker) {
+    throw new Error(
+      "Kein laufender Worker — Worker starten, dann erneut `läuft` setzen."
+    );
+  }
+
+  // Sprint-less tickets are allowed (branch off project main). Only block if
+  // the ticket is stuck in a sprint that hasn't started yet.
+  if (t.sprint_id) {
+    const sprint = getSprint(t.sprint_id);
+    if (!sprint || sprint.status !== "active") {
+      throw new Error(
+        "Zugewiesener Sprint ist nicht aktiv — Sprint starten oder Sprint-Zuordnung entfernen."
+      );
+    }
+  }
+
+  const shouldResume = t.status === "awaiting_reply";
+  await serial(t.project_id, () =>
+    shouldResume ? resumeTicket(t, null) : startTicket(t)
+  );
+}
+
+/**
  * Start a sprint: create the sprint branch from the project's base ref,
  * push it to origin, and flip status active.
  */
@@ -712,35 +882,101 @@ export async function startSprint(sprintId: string): Promise<void> {
 }
 
 /**
- * Release a sprint: open a PR sprint-branch → main (or upstream main).
+ * Release a sprint: merge sprint branch into the fork's own main (local
+ * merge + push). Never opens a PR against upstream automatically — if the
+ * project is a fork, upstream sync stays a manual step. If the project is
+ * the self-managed orchestrator, the main-merge immediately triggers a
+ * self-deploy run.
  */
 export async function releaseSprint(
   sprintId: string,
-  prTitle?: string,
-  prBody?: string
-): Promise<{ url: string; number: number }> {
+  _prTitle?: string,
+  _prBody?: string
+): Promise<{ merged: true; mergedInto: string }> {
   const sprint = getSprint(sprintId);
   if (!sprint) throw new Error("Sprint nicht gefunden");
   if (sprint.status !== "pending_release" && sprint.status !== "active") {
     throw new Error(`Sprint ist im Status ${sprint.status}, nicht release-bar`);
   }
+  const project = getProjectRow(sprint.project_id);
+  if (!project) throw new Error("Projekt nicht gefunden");
 
-  const { openSprintPullRequest } = await import("./git.js");
-  const title = prTitle ?? `Sprint: ${sprint.name}`;
-  const body = prBody ?? `Sprint-Release \`${sprint.name}\` (Branch \`${sprint.branch}\`)`;
-  const pr = await openSprintPullRequest(sprint.project_id, sprint.branch, title, body);
+  const mainBranch = await resolveOwnMainBranch(project);
+  await mergeBranchInto(
+    project.slug,
+    sprint.branch,
+    mainBranch,
+    `Merge sprint ${sprint.name} into ${mainBranch}`
+  );
 
-  updateSprint(sprintId, {
-    status: "released",
-    pr_url: pr.url,
-    pr_number: pr.number,
-  });
-  return pr;
+  updateSprint(sprintId, { status: "merged" });
+
+  await triggerSelfDeployIfNeeded(project, mainBranch);
+  return { merged: true, mergedInto: mainBranch };
 }
 
 /**
- * User-driven ticket acceptance: merge ticket branch into sprint branch,
- * mark ticket done, and flip sprint to pending_release if everything is done.
+ * Fire a self-deploy run right after a main-branch merge, but only for the
+ * self-managed orchestrator project. Fire-and-forget — the poller also
+ * keeps the last-seen-sha in sync so it won't re-trigger on the next tick.
+ */
+async function triggerSelfDeployIfNeeded(
+  project: ProjectRow,
+  mainBranch: string
+): Promise<void> {
+  if (!project.is_self) return;
+
+  const [{ startDeploy, waitForDeployer }, { handleDeployResult }, state] =
+    await Promise.all([
+      import("./deploy/deployer.js"),
+      import("./deploy/orchestrator.js"),
+      import("./deploy/state.js"),
+    ]);
+
+  if (state.isAutoDeployPaused()) {
+    console.log("[scheduler] self-deploy skipped — auto_deploy_paused=1");
+    return;
+  }
+  const failures = state.getConsecutiveFailures();
+  if (failures >= 3) {
+    console.log("[scheduler] self-deploy skipped — attempt cap reached");
+    return;
+  }
+
+  let sha: string;
+  try {
+    sha = (await gitInRepo(project.slug, ["rev-parse", mainBranch])).trim();
+  } catch (err) {
+    console.error("[scheduler] self-deploy: rev-parse failed", err);
+    return;
+  }
+
+  const attempt = failures + 1;
+  let runId: string, containerId: string;
+  try {
+    const r = await startDeploy(sha, attempt);
+    runId = r.runId;
+    containerId = r.containerId;
+  } catch (err) {
+    console.error("[scheduler] self-deploy: startDeploy failed", err);
+    return;
+  }
+
+  state.setLastSeenSha(sha);
+  waitForDeployer(runId, containerId)
+    .then((row) => handleDeployResult(row, sha, attempt))
+    .catch((err) =>
+      console.error("[scheduler] self-deploy: handleDeployResult failed", err)
+    );
+}
+
+/**
+ * User-driven ticket acceptance. Two paths — always stays inside the fork /
+ * own repo, never opens a PR against upstream automatically:
+ *   - Ticket in a sprint → merge ticket branch into sprint branch.
+ *   - Sprint-less ticket → merge ticket branch into the project's own main
+ *     (fork's main for fork projects, own main otherwise). Upstream syncs
+ *     stay a separate, user-driven step.
  */
 export async function acceptTicket(ticketId: string): Promise<void> {
   const t = getTicket(ticketId);
@@ -752,37 +988,59 @@ export async function acceptTicket(ticketId: string): Promise<void> {
   }
   const project = getProjectRow(t.project_id);
   if (!project) throw new Error("Projekt nicht gefunden");
-  if (!t.sprint_id) throw new Error("Ticket ist keinem Sprint zugeordnet");
-  const sprint = getSprint(t.sprint_id);
-  if (!sprint) throw new Error("Sprint nicht gefunden");
   if (!t.branch) throw new Error("Ticket hat keinen Branch");
 
-  // ensure latest WIP is committed + pushed first
   await commitWipAndPush(
     project.slug,
     t.branch,
     `WIP: T-${t.number} ${t.title} (vor Abnahme)`
   );
-  await mergeBranchInto(
-    project.slug,
-    t.branch,
-    sprint.branch,
-    `Merge T-${t.number}: ${t.title} into sprint ${sprint.name}`
-  );
 
-  setTicketStatus(ticketId, "done", { completedAt: Date.now() });
-  await addComment(
-    ticketId,
-    "system",
-    `✅ Abgenommen — \`${t.branch}\` → \`${sprint.branch}\` gemerged.`,
-    "ui"
-  );
+  let doneMessage: string;
 
-  // sprint completion
-  const stats = sprintTicketStats(sprint.id);
-  if (stats.total > 0 && stats.open === 0 && sprint.status === "active") {
-    updateSprint(sprint.id, { status: "pending_release" });
+  if (t.sprint_id) {
+    const sprint = getSprint(t.sprint_id);
+    if (!sprint) throw new Error("Sprint nicht gefunden");
+    await mergeBranchInto(
+      project.slug,
+      t.branch,
+      sprint.branch,
+      `Merge T-${t.number}: ${t.title} into sprint ${sprint.name}`
+    );
+    doneMessage = `✅ Abgenommen — \`${t.branch}\` → \`${sprint.branch}\` gemerged.`;
+
+    const stats = sprintTicketStats(sprint.id);
+    if (stats.total > 0 && stats.open === 0 && sprint.status === "active") {
+      updateSprint(sprint.id, { status: "pending_release" });
+    }
+  } else {
+    const mainBranch = await resolveOwnMainBranch(project);
+    await mergeBranchInto(
+      project.slug,
+      t.branch,
+      mainBranch,
+      `Merge T-${t.number}: ${t.title} into ${mainBranch}`
+    );
+    doneMessage = `✅ Abgenommen — \`${t.branch}\` → \`${mainBranch}\` gemerged.`;
+    await triggerSelfDeployIfNeeded(project, mainBranch);
   }
 
+  setTicketStatus(ticketId, "done", { completedAt: Date.now() });
+  await addComment(ticketId, "system", doneMessage, "ui");
+
   await serial(t.project_id, () => scheduleNext(t.project_id));
+}
+
+async function resolveOwnMainBranch(project: ProjectRow): Promise<string> {
+  try {
+    const head = await gitInRepo(project.slug, [
+      "symbolic-ref",
+      "refs/remotes/origin/HEAD",
+    ]);
+    const m = head.match(/refs\/remotes\/origin\/(.+)$/);
+    if (m) return m[1];
+  } catch {
+    // ignore — fall through to sane default
+  }
+  return "main";
 }

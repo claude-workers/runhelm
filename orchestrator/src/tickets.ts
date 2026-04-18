@@ -27,6 +27,7 @@ export type Ticket = {
   matrix_thread_root_id: string | null;
   auto_resume_queued: number;
   awaiting_since: number | null;
+  paused_at: number | null;
   created_at: number;
   updated_at: number;
   started_at: number | null;
@@ -82,9 +83,18 @@ export function getNextBacklog(projectId: string, sprintId: string): Ticket | nu
       .prepare(
         `SELECT * FROM tickets
            WHERE project_id = ? AND sprint_id = ? AND status = 'backlog'
+             AND (paused_at IS NULL OR paused_at = 0)
            ORDER BY priority ASC, created_at ASC LIMIT 1`
       )
       .get(projectId, sprintId) as Ticket | undefined) ?? null
+  );
+}
+
+export function setTicketPaused(id: string, pausedAt: number | null): void {
+  db.prepare("UPDATE tickets SET paused_at = ?, updated_at = ? WHERE id = ?").run(
+    pausedAt,
+    Date.now(),
+    id
   );
 }
 

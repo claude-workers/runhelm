@@ -1,6 +1,6 @@
 import { getSetupStatus } from "../db.js";
 import { getBranchHead, parseRepoRef } from "../github.js";
-import { getSelfProject } from "../self-project.js";
+import { getSelfProject } from "../self-project-query.js";
 import { startDeploy, waitForDeployer } from "./deployer.js";
 import { handleDeployResult } from "./orchestrator.js";
 import {
