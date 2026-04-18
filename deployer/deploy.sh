@@ -51,6 +51,12 @@ die() { log "FATAL: $*"; exit 1; }
 FAILURES_DIR="${BACKUPS_DIR}/failures"
 mkdir -p "$FAILURES_DIR"
 
+# The stack dir is bind-mounted from the host and owned by the host user
+# (UID 1000), but the deployer runs as root. Tell git to trust the repo so
+# it doesn't refuse operations with "dubious ownership in repository".
+git config --global --add safe.directory "$STACK_DIR" || true
+git config --global --add safe.directory "*" || true
+
 IMAGE_REPO="${ORCHESTRATOR_IMAGE%%:*}"
 PHASE="init"
 LOG_FILE="$(mktemp)"
@@ -115,9 +121,28 @@ write_failure_report() {
 
 wait_healthy() {
   local url="$1"
+  # Parse host/port/path so we can DNS-fall-back to docker-inspected IP if
+  # the embedded docker DNS hiccups during compose recreate.
+  local host port path
+  host=$(printf '%s' "$url" | sed -E 's|^https?://([^:/]+).*|\1|')
+  port=$(printf '%s' "$url" | sed -nE 's|^https?://[^:/]+:([0-9]+).*|\1|p')
+  path=$(printf '%s' "$url" | sed -nE 's|^https?://[^/]+(/.*)|\1|p')
+  [[ -z "$port" ]] && port=80
+  [[ -z "$path" ]] && path=/
+
   local deadline=$(( $(date +%s) + HEALTH_TIMEOUT_S ))
   while (( $(date +%s) < deadline )); do
-    if curl -fsS -o /dev/null --max-time 5 "$url"; then
+    local target="$url"
+    if ! getent hosts "$host" >/dev/null 2>&1; then
+      local ip
+      ip=$(docker inspect "$host" \
+            --format '{{range $k,$v := .NetworkSettings.Networks}}{{$v.IPAddress}} {{end}}' \
+            2>/dev/null | tr -d '\n' | awk '{print $1}')
+      if [[ -n "$ip" && "$ip" != "<no" ]]; then
+        target="http://${ip}:${port}${path}"
+      fi
+    fi
+    if curl -fsS -o /dev/null --max-time 5 "$target"; then
       return 0
     fi
     sleep 2
@@ -140,10 +165,18 @@ restore_image_and_db() {
 
   if [[ -f "$db_backup" ]]; then
     log "restoring db from ${db_backup}"
+    # Preserve ownership from the backup (orchestrator user) — without this,
+    # cp creates the file as root and the orchestrator can't reopen the db.
+    local src_uidgid
+    src_uidgid=$(stat -c '%u:%g' "$db_backup")
     cp -f "$db_backup" "${DB_DIR}/${DB_FILE_NAME}" || {
       log "db restore failed"
       return 1
     }
+    chown "$src_uidgid" "${DB_DIR}/${DB_FILE_NAME}" || true
+    # Drop stale WAL/SHM files — they belong to the pre-restore db and SQLite
+    # will refuse to open a main-db that's older than its WAL.
+    rm -f "${DB_DIR}/${DB_FILE_NAME}-wal" "${DB_DIR}/${DB_FILE_NAME}-shm"
   else
     log "no db backup file at ${db_backup} — leaving current db in place"
   fi

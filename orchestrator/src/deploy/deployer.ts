@@ -84,7 +84,11 @@ export async function spawnDeployer(opts: {
       `BACKUPS_DIR=/backups`,
       `DB_DIR=/db`,
       `ORCHESTRATOR_IMAGE=${config.orchestratorImage}`,
-      `HEALTH_URL=${config.orchestratorInternalUrl}/healthz`,
+      // Use the orchestrator's container_name directly (set in compose). The
+      // compose service alias "orchestrator" is not always visible to
+      // non-compose containers attached to the network; the container_name
+      // is registered as a DNS record on any user-defined network.
+      `HEALTH_URL=http://runhelm:8787/healthz`,
       `COMPOSE_PROJECT=${composeProjectName()}`,
     ],
     HostConfig: {
@@ -94,9 +98,13 @@ export async function spawnDeployer(opts: {
         `${hostBackupsPath()}:/backups:rw`,
         `${hostDbPath()}:/db:rw`,
       ],
-      NetworkMode: config.workerNetwork,
       AutoRemove: false,
       RestartPolicy: { Name: "no" },
+    },
+    NetworkingConfig: {
+      EndpointsConfig: {
+        [config.workerNetwork]: {},
+      },
     },
   });
 

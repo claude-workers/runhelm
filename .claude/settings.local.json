@@ -7,7 +7,9 @@
       "WebFetch(domain:www.npmjs.com)",
       "WebFetch(domain:hub.docker.com)",
       "WebFetch(domain:www.agentops.ai)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(docker rm *)",
+      "Bash(docker stop *)"
     ]
   }
 }

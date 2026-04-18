@@ -7,7 +7,13 @@ import { decrypt, encrypt } from "./secrets.js";
 mkdirSync(dirname(config.dbPath), { recursive: true });
 
 export const db = new Database(config.dbPath);
-db.pragma("journal_mode = WAL");
+// Rollback-journal mode. WAL left stale -shm/-wal sidecar files in the
+// bind mount after deploy-triggered container recreates, which made
+// SQLite refuse to reopen the DB (SQLITE_CANTOPEN). `DELETE` is
+// single-process-clean and plays nicer with the deployer's stop-start
+// cycle; the online `.backup()` API for deploy snapshots still works.
+db.pragma("journal_mode = DELETE");
+db.pragma("synchronous = NORMAL");
 db.pragma("foreign_keys = ON");
 
 db.exec(`
