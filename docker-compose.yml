@@ -1,0 +1,43 @@
+services:
+  orchestrator:
+    build:
+      context: ./orchestrator
+      args:
+        PUID: ${PUID:-1000}
+        PGID: ${PGID:-1000}
+    image: runhelm:latest
+    container_name: runhelm
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    group_add:
+      - "${DOCKER_GID:-989}"
+    ports:
+      - "${ORCHESTRATOR_PORT:-8787}:8787"
+    environment:
+      NODE_ENV: production
+      SECRET_KEY: ${SECRET_KEY}
+      UI_BASIC_AUTH: ${UI_BASIC_AUTH:-}
+      WORKER_IMAGE: ${WORKER_IMAGE:-runhelm-worker:latest}
+      WORKER_NETWORK: ${WORKER_NETWORK:-claude-workers_workers}
+      REPOS_HOST_PATH: ${REPOS_HOST_PATH}
+      CLAUDE_AUTH_HOST_PATH: ${CLAUDE_AUTH_HOST_PATH}
+      ORCHESTRATOR_INTERNAL_URL: ${ORCHESTRATOR_INTERNAL_URL:-http://orchestrator:8787}
+      WORKER_PUID: ${PUID:-1000}
+      WORKER_PGID: ${PGID:-1000}
+      WORKER_DOCKER_GID: ${DOCKER_GID:-989}
+      STACK_HOST_PATH: ${STACK_HOST_PATH:-/opt/docker/stacks/claude-workers}
+      ORCHESTRATOR_IMAGE: ${ORCHESTRATOR_IMAGE:-runhelm:latest}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/db:/data/db
+      - ./data/repos:/data/repos
+      - ./data/claude-auth:/data/claude-auth
+      - ./data/matrix-store:/data/matrix-store
+      - ./data/backups:/data/backups
+    networks:
+      - workers
+
+networks:
+  workers:
+    name: ${WORKER_NETWORK:-claude-workers_workers}
+    driver: bridge
