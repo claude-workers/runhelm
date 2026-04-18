@@ -1,0 +1,43 @@
+{
+  "name": "runhelm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev:api": "tsx watch src/server.ts",
+    "dev:web": "vite --config web/vite.config.ts",
+    "dev": "concurrently -n api,web -c blue,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "build:web": "vite build --config web/vite.config.ts",
+    "build:api": "tsc -p tsconfig.json",
+    "build": "npm run build:web && npm run build:api",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@fastify/static": "^8.0.0",
+    "@fastify/websocket": "^11.0.0",
+    "@octokit/rest": "^21.0.0",
+    "better-sqlite3": "^11.0.0",
+    "dockerode": "^4.0.0",
+    "fastify": "^5.0.0",
+    "grammy": "^1.30.0",
+    "matrix-bot-sdk": "^0.7.1",
+    "@matrix-org/matrix-sdk-crypto-nodejs": "^0.2.0-beta.1",
+    "nanoid": "^5.0.0",
+    "tar-stream": "^3.1.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/dockerode": "^3.3.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@types/tar-stream": "^3.1.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "concurrently": "^9.0.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  }
+}

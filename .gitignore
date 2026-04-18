@@ -1,0 +1,22 @@
+# Runtime data (DB, cloned repos, claude auth, matrix store)
+data/
+
+# Env + secrets
+.env
+*.env.local
+
+# Build artifacts
+**/dist/
+**/node_modules/
+**/.vite/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
