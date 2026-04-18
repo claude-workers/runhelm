@@ -141,3 +141,5 @@ npm run dev   # api :8787 + vite :5173 mit proxy
 Der SDK nutzt denselben Binary wie die CLI und liest `~/.claude/.credentials.json`.
 Läuft damit über dein persönliches Abo. Das ist **Eigenbedarf** — für öffentliche
 Distribution verlangt Anthropic API-Key-Auth (siehe Agent-SDK-Docs).
+
+<!-- deploy smoke test 2026-04-18T21:46:07Z -->
