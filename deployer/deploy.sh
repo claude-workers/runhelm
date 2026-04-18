@@ -182,7 +182,9 @@ restore_image_and_db() {
   fi
 
   PHASE="restore-up"
-  capture compose up -d --force-recreate "$SERVICE_NAME" || return 1
+  capture compose stop "$SERVICE_NAME"
+  capture compose rm -f "$SERVICE_NAME"
+  capture compose up -d "$SERVICE_NAME" || return 1
 
   PHASE="restore-health"
   if ! wait_healthy "$HEALTH_URL"; then
@@ -206,14 +208,17 @@ run_deploy() {
     || { write_failure_report "docker compose build failed"; return 1; }
 
   PHASE="up"
-  # Transitional hygiene: wipe any stale SQLite sidecar files from the
-  # previous orchestrator process. Once every running orchestrator is in
-  # journal_mode=DELETE this is a no-op; during the WAL→DELETE migration
-  # it prevents SQLITE_CANTOPEN on the very next start.
   rm -f "${DB_DIR}/${DB_FILE_NAME}-wal" "${DB_DIR}/${DB_FILE_NAME}-shm" \
         "${DB_DIR}/${DB_FILE_NAME}-journal" 2>/dev/null || true
-  log "compose up -d --force-recreate $SERVICE_NAME"
-  capture compose up -d --force-recreate "$SERVICE_NAME" \
+  # `compose up --force-recreate` for a single service was observed to
+  # leave the compose-managed network in a half-reset state, which caused
+  # the new orchestrator container to fail DB open (SQLITE_CANTOPEN) and
+  # break DNS within the workers network. `compose stop + rm + up` fully
+  # resets the service while leaving the network + other services intact.
+  log "compose stop+rm+up for $SERVICE_NAME"
+  capture compose stop "$SERVICE_NAME"
+  capture compose rm -f "$SERVICE_NAME"
+  capture compose up -d "$SERVICE_NAME" \
     || { write_failure_report "docker compose up failed"; return 1; }
 
   PHASE="health"
